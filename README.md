@@ -86,6 +86,28 @@ aws ecs update-service --cluster <CLUSTER> --service <SERVICE> --force-new-deplo
    - **API Key**: Your MDI API key (from Secrets Manager)
 4. Click **Import** — the portal will auto-discover both agents
 
+> **How to find ALB_DNS and API Key?**
+>
+> Both values are in the CloudFormation outputs of the `DeepInsightAlb` stack:
+>
+> ```bash
+> # Get the ALB DNS (engine address)
+> aws cloudformation describe-stacks --stack-name DeepInsightAlb \
+>   --query "Stacks[0].Outputs[?OutputKey=='mdiDocumentUrl'].OutputValue" --output text
+> # Returns something like: http://DeepIn-DeepI-xxxxx.us-west-2.elb.amazonaws.com/docs
+> # Remove the /docs suffix — the Engine Address is the part before it.
+>
+> # Get the API Key secret name, then retrieve the actual key
+> aws cloudformation describe-stacks --stack-name DeepInsightAlb \
+>   --query "Stacks[0].Outputs[?OutputKey=='mdiServiceApiKeyName'].OutputValue" --output text
+> # Returns a secret name like: DeepInsightAlb-mdiApiKeyXXXXXX-xxxxxxxx
+>
+> aws secretsmanager get-secret-value --secret-id <SECRET_NAME_FROM_ABOVE> \
+>   --query SecretString --output text
+> ```
+>
+> You can also find these in the [CloudFormation console](https://console.aws.amazon.com/cloudformation/) → `DeepInsightAlb` stack → **Outputs** tab.
+
 ## Manual Install
 
 If you prefer to install manually instead of using the script:
