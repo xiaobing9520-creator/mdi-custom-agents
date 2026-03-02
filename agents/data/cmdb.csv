@@ -1,0 +1,16 @@
+app_id,app_name,description,support_team,team_email,business_unit,criticality,environment,status
+APP-001,SAP ERP,Enterprise Resource Planning System,ERP Support Team,erp-support@company.com,Finance,Critical,Production,Active
+APP-002,Salesforce CRM,Customer Relationship Management,CRM Support Team,crm-support@company.com,Sales,High,Production,Active
+APP-003,JIRA,Project Management and Issue Tracking,DevOps Team,devops@company.com,Engineering,Medium,Production,Active
+APP-004,Confluence,Enterprise Wiki and Knowledge Base,DevOps Team,devops@company.com,Engineering,Medium,Production,Active
+APP-005,Oracle HCM,Human Capital Management System,HR Systems Team,hr-systems@company.com,Human Resources,High,Production,Active
+APP-006,ServiceNow,IT Service Management Platform,ITSM Team,itsm@company.com,IT Operations,Critical,Production,Active
+APP-007,Workday,Financial Planning and Analytics,Finance Systems Team,fin-systems@company.com,Finance,High,Production,Active
+APP-008,Tableau,Business Intelligence and Analytics,BI Support Team,bi-support@company.com,Analytics,Medium,Production,Active
+APP-009,Office 365,Email and Productivity Suite,Messaging Team,messaging@company.com,Corporate IT,Critical,Production,Active
+APP-010,Splunk,Security Information and Event Management,Security Operations Team,secops@company.com,Security,Critical,Production,Active
+APP-011,GitHub Enterprise,Source Code Management and CI/CD,DevOps Team,devops@company.com,Engineering,High,Production,Active
+APP-012,Veeva Vault,Life Sciences Content Management,Veeva Admin Team,veeva-admin@company.com,Regulatory Affairs,High,Production,Active
+APP-013,MedDRA Browser,Medical Dictionary for Regulatory Activities,Clinical Data Team,clinical-data@company.com,Clinical Operations,Medium,Production,Active
+APP-014,CTMS,Clinical Trial Management System,Clinical Systems Team,clinical-systems@company.com,Clinical Operations,Critical,Production,Active
+APP-015,Power BI,Data Visualization and Reporting,BI Support Team,bi-support@company.com,Analytics,Low,Production,Active
