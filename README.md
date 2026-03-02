@@ -51,9 +51,20 @@ export DOCKER_DEFAULT_PLATFORM="linux/amd64"
 docker build -f docker/service.dockerfile -t <ECR_REPO>:<TAG> .
 docker push <ECR_REPO>:<TAG>
 
-# 5. Update ECS service
-aws ecs update-service --cluster <CLUSTER> --service <SERVICE> --force-new-deployment
+# 5. Update the DeepInsightAlb ECS service (MDI Agent Engine only)
+aws ecs update-service --cluster DeepInsightAlb --service <SERVICE> --force-new-deployment
 ```
+
+> **Which ECS service?** A full MDI deployment has multiple ECS clusters. Only the
+> **`DeepInsightAlb`** cluster needs updating — it runs the MDI Agent Engine
+> (FastAPI + Strands) where `agent.yaml` and tools are deployed.
+>
+> | Cluster / Service | Component | Update needed? |
+> |-------------------|-----------|----------------|
+> | `DeepInsightAlb` | MDI Agent Engine (FastAPI + Strands agents) | **Yes** — this is where your custom agents run |
+> | `MDIA-ServiceStackApiEcsService` | Insights Portal BFF (NestJS) | No |
+> | `MDIA-TranslationStack` | Translation engine | No |
+> | `MDIA-InkAiInternalCore` | Core writing engine | No |
 
 ### Import in Insights Portal
 
