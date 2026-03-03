@@ -1,11 +1,384 @@
 # MDI 2.3 Custom Agent Extensions
 
-Two custom agents for [Medical Deep Insights (MDI) 2.3](https://github.com/anthropics/medical-deep-insights):
+Two custom agents for [Medical Deep Insights (MDI) 2.3](https://github.com/anthropics/medical-deep-insights), built on the [Strands Agents](https://strandsagents.com/) framework:
 
-| Agent | Description |
-|-------|-------------|
-| **IT Support Ticket Generator** | Parses IT incident emails (PDF), queries CMDB for app details, assesses severity, generates structured YAML tickets |
-| **Medical Device Bidding Agent** | Searches Chinese medical device (MRI/CT/Ultrasound) bidding announcements, matches GE Healthcare products, provides competitive bidding recommendations |
+| Agent | Icon | Description |
+|-------|------|-------------|
+| **IT Support Ticket Generator** | 🎫 | Parses IT incident emails (PDF), queries CMDB for app details, assesses severity, generates structured YAML tickets |
+| **Medical Device Bidding Agent** | 🏥 | Searches Chinese medical device (MRI/CT/Ultrasound) bidding announcements, matches GE Healthcare products, provides competitive bidding recommendations |
+
+---
+
+## Architecture Overview
+
+Both agents follow MDI's **Single Supervisor + Multiple Sub-Agent Tools** pattern. Each agent acts as the sole supervisor, orchestrating a set of specialized tools (sub-agents) to complete its workflow. Tool calls are coordinated by the LLM through the Strands Agents framework.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     MDI Agent Engine (FastAPI)                       │
+│                                                                     │
+│  ┌──────────────────────┐       ┌────────────────────────────────┐  │
+│  │  🎫 IT Ticket Agent   │       │  🏥 Medical Device Bidding    │  │
+│  │     (Supervisor)      │       │        Agent (Supervisor)      │  │
+│  │                       │       │                                │  │
+│  │  ┌─────────────────┐  │       │  ┌──────────────────────────┐  │  │
+│  │  │ get_uploaded_file│  │       │  │     search_google        │  │  │
+│  │  │   (Reused)       │  │       │  │       (Reused)           │  │  │
+│  │  ├─────────────────┤  │       │  ├──────────────────────────┤  │  │
+│  │  │  cmdb_lookup ★   │  │       │  │  ge_product_catalog ★    │  │  │
+│  │  │     (New)        │  │       │  │        (New)             │  │  │
+│  │  ├─────────────────┤  │       │  ├──────────────────────────┤  │  │
+│  │  │generate_ticket ★ │  │       │  │   get_uploaded_file      │  │  │
+│  │  │  _yaml (New)     │  │       │  │       (Reused)           │  │  │
+│  │  ├─────────────────┤  │       │  ├──────────────────────────┤  │  │
+│  │  │  current_time    │  │       │  │     current_time         │  │  │
+│  │  │   (Reused)       │  │       │  │       (Reused)           │  │  │
+│  │  ├─────────────────┤  │       │  ├──────────────────────────┤  │  │
+│  │  │     stop         │  │       │  │       stop               │  │  │
+│  │  │   (Reused)       │  │       │  │       (Reused)           │  │  │
+│  │  └─────────────────┘  │       │  ├──────────────────────────┤  │  │
+│  │                       │       │  │     calculator            │  │  │
+│  │                       │       │  │       (Reused)            │  │  │
+│  └──────────────────────┘       │  └──────────────────────────┘  │  │
+│                                  └────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+
+★ = Newly created tool
+```
+
+---
+
+## Sub-Agent Tool Summary
+
+### New Tools (Created by this project)
+
+| Tool | File | Used By | Description |
+|------|------|---------|-------------|
+| `cmdb_lookup` | `agents/tools/cmdb_lookup.py` | IT Ticket Agent | Queries CMDB (CSV) for application metadata by app_id or app_name. Supports exact match and fuzzy search. |
+| `generate_ticket_yaml` | `agents/tools/generate_ticket_yaml.py` | IT Ticket Agent | Generates structured YAML support tickets with auto-generated ID (`TKT-YYYYMMDD-XXXXXX`), streams output to user, persists to agent state. |
+| `ge_product_catalog` | `agents/tools/ge_product_catalog.py` | Bidding Agent | Searches GE Healthcare product catalog (CSV) by category (MRI/CT/Ultrasound) or product name. Supports bilingual (Chinese/English) queries. |
+
+### Reused Tools (From MDI 2.3 core)
+
+| Tool | Used By | Description |
+|------|---------|-------------|
+| `get_uploaded_file` | Both | Retrieves user-uploaded file content from agent state by filename. Essential for reading PDF emails and bidding documents. |
+| `current_time` | Both | Returns current date/time. Used for ticket timestamps and time-based bidding search. |
+| `stop` | Both | Pauses the workflow to wait for user confirmation at key decision points (Human-in-the-Loop). |
+| `search_google` | Bidding Agent | Tavily-powered web search with LLM query rewriting. Searches government procurement websites for bidding announcements. |
+| `calculator` | Bidding Agent | Performs mathematical calculations for pricing analysis and bid comparisons. |
+
+### Tool Statistics
+
+| Metric | IT Ticket Agent | Bidding Agent | Total Unique |
+|--------|:-:|:-:|:-:|
+| **New tools** | 2 (`cmdb_lookup`, `generate_ticket_yaml`) | 1 (`ge_product_catalog`) | **3** |
+| **Reused tools** | 3 (`get_uploaded_file`, `current_time`, `stop`) | 5 (`search_google`, `get_uploaded_file`, `current_time`, `stop`, `calculator`) | **5** |
+| **Total tools** | 5 | 6 | **8** |
+
+### New Data Sources
+
+| File | Records | Used By | Description |
+|------|:-------:|---------|-------------|
+| `agents/data/cmdb.csv` | 15 | `cmdb_lookup` | Sample CMDB with application metadata (ID, name, support team, email, business unit, criticality) |
+| `agents/data/ge_healthcare_products.csv` | 21 | `ge_product_catalog` | GE Healthcare imaging product catalog (MRI, CT, Ultrasound — model, specs, features, competitive advantages) |
+
+---
+
+## Agent 1: IT Support Ticket Generator 🎫
+
+### Overview
+
+Automates IT support ticket creation from incident emails. The agent reads PDF email attachments, cross-references application information against a CMDB, determines severity levels, and generates structured YAML tickets — all with human-in-the-loop confirmation.
+
+### Workflow Diagram
+
+```
+                    ┌─────────────────────┐
+                    │   User uploads PDF   │
+                    │   incident email     │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 1: Read Email     │
+                  │  [get_uploaded_file]    │
+                  │                        │
+                  │  Extract:              │
+                  │  • Reporter info       │
+                  │  • Application name/ID │
+                  │  • Issue description   │
+                  │  • Severity hints      │
+                  └────────────┬───────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 2: Query CMDB     │
+                  │  [cmdb_lookup] ★        │
+                  │                        │
+                  │  Retrieve:             │
+                  │  • App ID & name       │
+                  │  • Support team/email  │
+                  │  • Business unit       │
+                  │  • System criticality  │
+                  └────────────┬───────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 3: Determine      │
+                  │  Severity (LLM)        │
+                  │                        │
+                  │  P1: System outage     │
+                  │  P2: Major feature out │
+                  │  P3: Minor issue       │
+                  │  P4: Cosmetic/enhance  │
+                  └────────────┬───────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 4: Present &      │
+                  │  Confirm [stop]        │
+                  │                        │
+                  │  Show analysis to user │
+                  │  Wait for approval     │
+                  └────────────┬───────────┘
+                               │ User confirms
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 5: Generate       │
+                  │  Ticket                │
+                  │  [current_time] +      │
+                  │  [generate_ticket_yaml]│
+                  │  ★                     │
+                  │                        │
+                  │  Output: YAML ticket   │
+                  │  with unique ID        │
+                  └────────────────────────┘
+```
+
+### Detailed Tool Call Flow
+
+```
+User ──upload PDF──▶ Supervisor (LLM)
+                        │
+                        ├──▶ get_uploaded_file(filename="email.pdf")
+                        │    └──▶ Returns: email text content
+                        │
+                        │    [LLM extracts: reporter, app name, issue]
+                        │
+                        ├──▶ cmdb_lookup(query="SAP ERP")          ★ New
+                        │    └──▶ Returns: {app_id, support_team, criticality, ...}
+                        │
+                        │    [LLM determines severity: P1-P4]
+                        │    [LLM presents analysis to user]
+                        │
+                        ├──▶ stop()
+                        │    └──▶ Pauses workflow, waits for user confirmation
+                        │
+                        │    [User confirms or adjusts]
+                        │
+                        ├──▶ current_time()
+                        │    └──▶ Returns: "2026-03-03T10:30:00Z"
+                        │
+                        └──▶ generate_ticket_yaml(                 ★ New
+                                app_id="APP-001",
+                                severity="P2",
+                                summary="SAP login failure",
+                                ...
+                             )
+                             └──▶ Returns: Formatted YAML ticket
+                                  Streams: YAML output to user UI
+                                  Stores:  Ticket in agent state
+```
+
+### Output Example
+
+```yaml
+ticket:
+  ticket_id: TKT-20260303-a1b2c3
+  created_at: "2026-03-03T10:30:00Z"
+  status: open
+  application:
+    app_id: APP-001
+    app_name: SAP ERP
+    business_unit: Finance
+  issue:
+    severity: P2
+    category: Availability
+    summary: SAP login failure affecting all users
+    description: >
+      Multiple users reporting inability to login to SAP ERP
+      since 09:00 UTC. Error message: "Authentication service unavailable."
+  assignment:
+    support_team: ERP Support Team
+    team_email: erp-support@company.com
+  reporter:
+    name: John Smith
+    email: john.smith@company.com
+```
+
+### Customization
+
+Replace `agents/data/cmdb.csv` with your own CMDB data. Required CSV columns:
+
+```
+app_id,app_name,description,support_team,team_email,business_unit,criticality,environment,status
+```
+
+Or set `CMDB_FILE_PATH` environment variable to point to an external file.
+
+---
+
+## Agent 2: Medical Device Bidding Agent 🏥
+
+### Overview
+
+Helps GE Healthcare sales teams monitor Chinese medical imaging equipment (MRI, CT, Ultrasound) bidding/procurement announcements. The agent searches government procurement websites, matches bid requirements against GE's product catalog, and generates competitive analysis with bidding recommendations.
+
+### Workflow Diagram
+
+```
+                    ┌─────────────────────┐
+                    │  User specifies:     │
+                    │  • Device type       │
+                    │  • Region            │
+                    │  • Time range        │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 1: Get Time       │
+                  │  [current_time]        │
+                  │                        │
+                  │  Establish search      │
+                  │  time baseline         │
+                  └────────────┬───────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 2: Analyze        │
+                  │  Requirements (LLM)    │
+                  │                        │
+                  │  Extract: device type, │
+                  │  region, time range,   │
+                  │  budget, hospital tier │
+                  │                        │
+                  │  If file uploaded:     │
+                  │  [get_uploaded_file]   │
+                  └────────────┬───────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 3: Search         │
+                  │  Bidding Info          │
+                  │  [search_google] ×2-4  │
+                  │                        │
+                  │  Target domains:       │
+                  │  • ccgp.gov.cn         │
+                  │  • ggzy.gov.cn         │
+                  │                        │
+                  │  Parallel queries:     │
+                  │  "{region} MRI 招标"    │
+                  │  "{region} CT 采购公告"  │
+                  └────────────┬───────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 4: Present        │
+                  │  Results & Confirm     │
+                  │  [stop]                │
+                  │                        │
+                  │  Show bidding items    │
+                  │  with source links     │
+                  └────────────┬───────────┘
+                               │ User confirms
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 5: Match GE       │
+                  │  Products               │
+                  │  [ge_product_catalog] ★ │
+                  │                        │
+                  │  Find matching GE      │
+                  │  models by category    │
+                  │  and specifications    │
+                  └────────────┬───────────┘
+                               │
+                               ▼
+                  ┌────────────────────────┐
+                  │  Step 6: Competitive    │
+                  │  Analysis (LLM)        │
+                  │  [calculator]          │
+                  │                        │
+                  │  Generate report:      │
+                  │  • Product matching    │
+                  │  • Technical comparison│
+                  │  • Pricing strategy    │
+                  │  • Competitor analysis │
+                  │    (Siemens, Philips,  │
+                  │     United Imaging)    │
+                  └────────────────────────┘
+```
+
+### Detailed Tool Call Flow
+
+```
+User ──"搜索浙江省2025年Q4的MRI招标信息"──▶ Supervisor (LLM)
+                                                │
+                                                ├──▶ current_time()
+                                                │    └──▶ Returns: "2026-03-03"
+                                                │
+                                                │    [LLM parses: region=浙江, device=MRI, time=2025 Q4]
+                                                │
+                                                ├──▶ search_google(                        (Reused)
+                                                │      query="浙江省 MRI 磁共振 招标公告 2025",
+                                                │      include_domains="ccgp.gov.cn,ggzy.gov.cn",
+                                                │      days=120
+                                                │    )
+                                                ├──▶ search_google(                        (Reused)
+                                                │      query="浙江 磁共振 采购项目 中标公告"
+                                                │    )
+                                                │    └──▶ Returns: bidding announcements with links
+                                                │
+                                                │    [LLM formats and presents results]
+                                                │
+                                                ├──▶ stop()
+                                                │    └──▶ Waits for user to confirm
+                                                │
+                                                │    [User: "继续分析，推荐GE产品"]
+                                                │
+                                                ├──▶ ge_product_catalog(query="MRI")       ★ New
+                                                │    └──▶ Returns: GE MRI product lineup
+                                                │         (SIGNA Premier, SIGNA Artist, ...)
+                                                │
+                                                ├──▶ calculator(expression="850000*0.85")   (Reused)
+                                                │    └──▶ Returns: 722500 (pricing calc)
+                                                │
+                                                └──▶ LLM generates competitive analysis report
+                                                     • Recommended GE models
+                                                     • Technical spec matching
+                                                     • Pricing strategy
+                                                     • Competitor comparison (Siemens, Philips, United Imaging)
+```
+
+### GE Product Catalog Coverage
+
+| Category | Products | Example Models |
+|----------|:--------:|----------------|
+| MRI | 7 | SIGNA Premier (3.0T), SIGNA Artist (1.5T), SIGNA Explorer (1.5T), SIGNA Voyager (1.5T) |
+| CT | 7 | Revolution Apex (256-row), Revolution CT (256-row), Revolution Maxima (128-row) |
+| Ultrasound | 7 | LOGIQ Fortis, Voluson Expert 22, VENUE Series |
+
+### Customization
+
+Replace `agents/data/ge_healthcare_products.csv` with your own product catalog. Required CSV columns:
+
+```
+product_id,product_name,category,model_series,description,key_features,target_department,certifications,competitive_advantages
+```
+
+Or set `GE_PRODUCT_CATALOG_PATH` environment variable.
+
+---
 
 ## What's Included
 
@@ -13,9 +386,9 @@ Two custom agents for [Medical Deep Insights (MDI) 2.3](https://github.com/anthr
 mdi-custom-agents/
 ├── agents/
 │   ├── tools/
-│   │   ├── cmdb_lookup.py              # CMDB application lookup
-│   │   ├── generate_ticket_yaml.py     # Ticket YAML generator
-│   │   └── ge_product_catalog.py       # GE Healthcare product catalog search
+│   │   ├── cmdb_lookup.py              # ★ New: CMDB application lookup
+│   │   ├── generate_ticket_yaml.py     # ★ New: Ticket YAML generator
+│   │   └── ge_product_catalog.py       # ★ New: GE Healthcare product catalog search
 │   ├── data/
 │   │   ├── cmdb.csv                    # Sample CMDB (15 applications)
 │   │   └── ge_healthcare_products.csv  # GE imaging products (21 products)
@@ -25,6 +398,8 @@ mdi-custom-agents/
 ├── install.sh                          # Automated installer
 └── README.md
 ```
+
+---
 
 ## Quick Install
 
@@ -59,19 +434,21 @@ aws ecs list-services --cluster <CLUSTER_FROM_ABOVE>
 aws ecs update-service --cluster <CLUSTER> --service <SERVICE> --force-new-deployment
 ```
 
+> **Note on ECR Tag Immutability**: If your ECR repository has tag immutability enabled, you cannot overwrite an existing tag (e.g., `latest`). Use a unique tag for each build instead:
+> ```bash
+> TAG="mdi-custom-$(date +%Y%m%d%H%M%S)"
+> docker build -f docker/service.dockerfile -t <ECR_REPO>:$TAG .
+> docker push <ECR_REPO>:$TAG
+> ```
+> Then register a new task definition revision pointing to the new tag before updating the service.
+
 > **Which ECS service?** A full MDI deployment has multiple ECS clusters. Only the
 > **DeepInsightAlb** cluster needs updating — it runs the MDI Agent Engine
 > (FastAPI + Strands) where `agent.yaml` and tools are deployed.
 >
-> CDK generates long names with random suffixes, for example:
-> - **Cluster**: `DeepInsightAlb-DeepInsightAlb...ClusterXXXX-xxxxxxxx`
-> - **Service**: `DeepInsightAlb-DeepInsightAlb...EcsServiceXXXX-xxxxxxxx`
->
-> Use `aws ecs list-clusters` and look for the one containing **`DeepInsightAlb`**.
->
 > | Name prefix | Component | Update needed? |
 > |-------------|-----------|----------------|
-> | `DeepInsightAlb-*` | MDI Agent Engine (FastAPI + Strands agents) | **Yes** — this is where your custom agents run |
+> | `DeepInsightAlb-*` | MDI Agent Engine (FastAPI + Strands agents) | **Yes** |
 > | `MDIA-ServiceStack*` | Insights Portal BFF (NestJS) | No |
 > | `MDIA-TranslationStack*` | Translation engine | No |
 > | `MDIA-InkAiInternalCore*` | Core writing engine | No |
@@ -94,19 +471,17 @@ aws ecs update-service --cluster <CLUSTER> --service <SERVICE> --force-new-deplo
 > # Get the ALB DNS (engine address)
 > aws cloudformation describe-stacks --stack-name DeepInsightAlb \
 >   --query "Stacks[0].Outputs[?OutputKey=='mdiDocumentUrl'].OutputValue" --output text
-> # Returns something like: http://DeepIn-DeepI-xxxxx.us-west-2.elb.amazonaws.com/docs
-> # Remove the /docs suffix — the Engine Address is the part before it.
+> # Returns: http://DeepIn-DeepI-xxxxx.region.elb.amazonaws.com/docs
+> # Remove /docs — the Engine Address is the part before it.
 >
-> # Get the API Key secret name, then retrieve the actual key
-> aws cloudformation describe-stacks --stack-name DeepInsightAlb \
->   --query "Stacks[0].Outputs[?OutputKey=='mdiServiceApiKeyName'].OutputValue" --output text
-> # Returns a secret name like: DeepInsightAlb-mdiApiKeyXXXXXX-xxxxxxxx
->
-> aws secretsmanager get-secret-value --secret-id <SECRET_NAME_FROM_ABOVE> \
+> # Get the API Key
+> SECRET_NAME=$(aws cloudformation describe-stacks --stack-name DeepInsightAlb \
+>   --query "Stacks[0].Outputs[?OutputKey=='mdiServiceApiKeyName'].OutputValue" --output text)
+> aws secretsmanager get-secret-value --secret-id $SECRET_NAME \
 >   --query SecretString --output text
 > ```
->
-> You can also find these in the [CloudFormation console](https://console.aws.amazon.com/cloudformation/) → `DeepInsightAlb` stack → **Outputs** tab.
+
+---
 
 ## Manual Install
 
@@ -174,34 +549,7 @@ Copy the contents of `agents/agent_config/it_ticket_agent.yaml` and `agents/agen
 
 See steps 4-5 in Quick Install above.
 
-## Agent Details
-
-### IT Support Ticket Generator
-
-**Tools**: `get_uploaded_file`, `cmdb_lookup`, `generate_ticket_yaml`, `current_time`, `stop`
-
-**Workflow**:
-1. User uploads a PDF incident email
-2. Agent extracts reporter info, application name, issue description
-3. Queries CMDB to find support team and system criticality
-4. Determines severity (P1-P4) based on issue + system criticality
-5. Presents analysis, pauses for user confirmation
-6. Generates structured YAML ticket
-
-**Customization**: Replace `agents/data/cmdb.csv` with your own CMDB data. Same CSV schema: `app_id,app_name,support_team,team_email,business_unit,criticality`. Or set `CMDB_FILE_PATH` env var to point to an external file.
-
-### Medical Device Bidding Agent
-
-**Tools**: `search_google`, `ge_product_catalog`, `current_time`, `get_uploaded_file`, `stop`, `calculator`
-
-**Workflow**:
-1. Gets current date for time-based filtering
-2. Constructs Chinese search queries targeting government procurement sites (ccgp.gov.cn, ggzy.gov.cn)
-3. Displays bidding results with source links, pauses for confirmation
-4. Looks up matching GE Healthcare products from catalog
-5. Generates competitive analysis: product recommendations, advantages, pricing strategy, competitor analysis
-
-**Customization**: Replace `agents/data/ge_healthcare_products.csv` with your own product catalog. Or set `GE_PRODUCT_CATALOG_PATH` env var. CSV schema: `product_id,product_name,category,model_series,description,key_features,target_department,certifications,competitive_advantages`.
+---
 
 ## Environment Variables
 
